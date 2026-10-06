@@ -1,60 +1,51 @@
 # Travel Assistant Multi-Agent System
 
-Phase 0 provides a small Python API foundation: FastAPI, a deterministic one-node LangGraph workflow, and PostgreSQL-backed LangGraph checkpoints. It does not call an LLM or any travel service.
+Phase 1 keeps the Phase 0 API and one-node LangGraph workflow, and routes chat through LangChain's `ChatOpenAI` client to a local LiteLLM gateway and Gemini. No multi-agent orchestration is present.
 
 ## Requirements
 
 - Python 3.13
 - [uv](https://docs.astral.sh/uv/)
 - Docker with Docker Compose
+- A Gemini API key for real chat requests
 
 ## Local development
 
-1. Copy `.env.example` to `.env` and replace the local database password if desired. Keep `.env` out of Git.
-2. Install locked dependencies and create the environment:
+1. Copy `.env.example` to `.env`.
+2. Set `GEMINI_API_KEY` and generate one strong random key for both `LITELLM_MASTER_KEY` and `LITELLM_API_KEY`. The shared admin-level credential is for local/internal development only. Keep `.env` out of Git.
+3. Install locked dependencies with `uv sync --locked`.
+4. Start the database, gateway, and API with `docker compose up --build`.
 
-   ```sh
-   uv sync --locked
-   ```
+LiteLLM is DB-less. Its host port is bound to `127.0.0.1:4000`; the API reaches it through the private Compose network. The Gemini key and LiteLLM master key are passed as runtime environment variables and are not baked into the application image or LiteLLM config file.
 
-3. Start PostgreSQL:
+For host-side API development, set `DATABASE_URL` to a reachable PostgreSQL instance and `LITELLM_BASE_URL` to `http://localhost:4000/v1`, then run:
 
-   ```sh
-   docker compose up -d db
-   ```
+```sh
+uv run uvicorn app.main:app --reload
+```
 
-4. Start the API:
+On native Windows, Psycopg's async driver requires a selector event loop. Start Uvicorn with that loop policy:
 
-   ```sh
-   uv run uvicorn app.main:app --reload
-   ```
-
-   On native Windows, Psycopg's async driver requires a selector event loop. Start Uvicorn with that loop policy:
-
-   ```powershell
-   uv run python -c "import asyncio, uvicorn; asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy()); uvicorn.run('app.main:app')"
-   ```
-
-Or start both services in containers with `docker compose up --build`.
-
-The Compose database password fallback is for local development only. Set `POSTGRES_PASSWORD` in the environment or `.env` before using a shared environment. The API uses the Compose-internal database URL when run in Compose; for host-side development, set `DATABASE_URL` in `.env` to `postgresql://travel_assistant:<password>@localhost:5432/travel_assistant`.
+```powershell
+uv run python -c "import asyncio, uvicorn; asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy()); uvicorn.run('app.main:app')"
+```
 
 ## API
 
-- `GET /api/v1/health/live` — process liveness.
-- `GET /api/v1/health/ready` — database readiness.
-- `POST /api/v1/chat` — deterministic reply, persisted by LangGraph thread ID.
+- `GET /api/v1/health/live` reports process liveness independently of dependencies.
+- `GET /api/v1/health/ready` checks PostgreSQL and LiteLLM's readiness endpoint without generating model output.
+- `POST /api/v1/chat` invokes the configured `travel_general` model and persists graph state by thread ID.
 
 Example request:
 
 ```json
 {
-  "message": "Hello",
+  "message": "Suggest a weekend itinerary",
   "thread_id": "9de6a955-31ee-4a0c-b877-34123cd130d5"
 }
 ```
 
-`thread_id` is optional; the API returns a generated UUID when omitted. The response contains `thread_id` and `reply`. The sample workflow replies with `You said: <message>` and stores graph state in PostgreSQL checkpoints.
+`thread_id` is optional; the API returns a generated UUID when omitted. The graph remains `START → chat_node → END`. Tests inject a fake chat model and do not call Gemini.
 
 ## Checks
 
@@ -65,4 +56,4 @@ uv run ruff format --check .
 docker compose config
 ```
 
-The initial API has no authentication and is intended only for local or otherwise protected environments.
+This local-only gateway setup has no user authentication or LiteLLM database-backed virtual keys. Do not expose it to untrusted networks or reuse its shared admin-level key in production.
