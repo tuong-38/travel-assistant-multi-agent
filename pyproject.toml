@@ -1,0 +1,41 @@
+[project]
+name = "travel-assistant-multi-agent"
+version = "0.1.0"
+description = "A minimal FastAPI and LangGraph foundation for a travel assistant."
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "fastapi>=0.115,<1.0",
+    "langgraph>=1.0,<2.0",
+    "langgraph-checkpoint-postgres>=3.0,<4.0",
+    "pydantic-settings>=2.6,<3.0",
+    "structlog>=24.4,<26.0",
+    "uvicorn[standard]>=0.32,<1.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27,<1.0",
+    "pytest>=8.3,<9.0",
+    "pytest-asyncio>=0.24,<2.0",
+    "ruff>=0.8,<1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
