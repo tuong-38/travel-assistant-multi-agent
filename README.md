@@ -1,6 +1,6 @@
 # Travel Assistant Multi-Agent System
 
-Phase 1 keeps the Phase 0 API and one-node LangGraph workflow, and routes chat through LangChain's `ChatOpenAI` client to a local LiteLLM gateway and Gemini. No multi-agent orchestration is present.
+The project keeps the Phase 0 API and one-node LangGraph workflow, and routes chat through LangChain's `ChatOpenAI` client to a local LiteLLM gateway. LiteLLM provides the configured `travel_general` and `travel_local` aliases. No multi-agent orchestration is present.
 
 ## Requirements
 
@@ -34,18 +34,19 @@ uv run python -c "import asyncio, uvicorn; asyncio.set_event_loop_policy(asyncio
 
 - `GET /api/v1/health/live` reports process liveness independently of dependencies.
 - `GET /api/v1/health/ready` checks PostgreSQL and LiteLLM's readiness endpoint without generating model output.
-- `POST /api/v1/chat` invokes the configured `travel_general` model and persists graph state by thread ID.
+- `POST /api/v1/chat` invokes `DEFAULT_MODEL` (default: `travel_general`) unless a model alias is supplied in the request. The selected model's graph state is persisted by thread ID.
 
 Example request:
 
 ```json
 {
-  "message": "Suggest a weekend itinerary",
+  "message": "Xin chào",
+  "model": "travel_local",
   "thread_id": "9de6a955-31ee-4a0c-b877-34123cd130d5"
 }
 ```
 
-`thread_id` is optional; the API returns a generated UUID when omitted. The graph remains `START → chat_node → END`. Tests inject a fake chat model and do not call Gemini.
+`model` and `thread_id` are optional. If `model` is omitted, the API uses `DEFAULT_MODEL`; the alias is passed through LiteLLM without automatic fallback. The API returns a generated UUID when `thread_id` is omitted. The graph remains `START → chat_node → END`. Tests use fake chat models and do not call Gemini or Ollama.
 
 ## Checks
 
