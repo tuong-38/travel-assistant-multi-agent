@@ -1,6 +1,6 @@
 # Travel Assistant Multi-Agent System
 
-The project uses a supervisor-led LangGraph workflow with destination, travel planner, and itinerary specialists. All model calls go through LangChain's `ChatOpenAI` client to the LiteLLM gateway, which provides the configured `travel_general` and `travel_local` aliases.
+The project uses a supervisor-led LangGraph workflow with destination, travel planner, and itinerary specialists. Only the destination specialist can access the separate `travel-tools-mcp` service, through the application's fixed `search_destination` capability. The initial MCP tool uses deterministic local data. All model calls go through LangChain's `ChatOpenAI` client to the LiteLLM gateway, which provides the configured `travel_general` and `travel_local` aliases.
 
 ## Requirements
 

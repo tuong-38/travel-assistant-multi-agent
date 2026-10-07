@@ -32,6 +32,19 @@ services:
       retries: 10
     restart: unless-stopped
 
+  travel-tools-mcp:
+    build: .
+    command: ["/app/.venv/bin/python", "-m", "mcp_servers.travel_tools.server"]
+    expose:
+      - "8001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8001), timeout=2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
   api:
     build: .
     environment:
@@ -41,12 +54,16 @@ services:
       LITELLM_BASE_URL: http://litellm:4000/v1
       LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-}
       DEFAULT_MODEL: travel_general
+      TRAVEL_TOOLS_MCP_URL: http://travel-tools-mcp:8001/mcp
+      MCP_TIMEOUT_SECONDS: ${MCP_TIMEOUT_SECONDS:-5}
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
       db:
         condition: service_healthy
       litellm:
+        condition: service_healthy
+      travel-tools-mcp:
         condition: service_healthy
     restart: unless-stopped
 

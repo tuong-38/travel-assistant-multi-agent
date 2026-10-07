@@ -18,6 +18,7 @@ COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --locked --no-dev --no-install-project
 
 COPY app ./app
+COPY mcp_servers ./mcp_servers
 RUN uv sync --locked --no-dev
 
 RUN useradd --create-home --uid 10001 appuser && chown -R appuser:appuser /app

@@ -4,7 +4,14 @@ import pytest
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
-from app.graph.workflow import PlannerOutputError, WorkflowRoutingError, build_graph
+from app.graph.workflow import (
+    DestinationExtractionError,
+    PlannerOutputError,
+    WorkflowRoutingError,
+    build_graph,
+)
+from app.mcp.client import MCPToolClient
+from mcp_servers.travel_tools.server import mcp
 
 TRAVEL_PLAN_JSON = (
     '{"destination":"Hanoi","dates":"2026-11-01 to 2026-11-03",'
@@ -63,11 +70,11 @@ async def test_graph_can_route_through_each_specialist() -> None:
             '{"next":"itinerary"}',
             "Day 1: Explore the old quarter.",
             '{"next":"destination"}',
-            "The destination is known for its food and history.",
+            "The destination is known for its history.",
             '{"next":"FINISH","response":"Here is your trip."}',
         ]
     )
-    graph = build_graph(InMemorySaver(), chat_model=model)
+    graph = build_graph(InMemorySaver(), chat_model=model, mcp_client=MCPToolClient(mcp))
     result = await graph.ainvoke(
         {"messages": [{"role": "user", "content": "Plan a trip"}], "user_request": "Plan a trip"},
         config={"configurable": {"thread_id": "all-specialists"}},
@@ -75,10 +82,76 @@ async def test_graph_can_route_through_each_specialist() -> None:
 
     assert result["completed_agents"] == ["planner", "itinerary", "destination"]
     assert result["travel_plan"]["destination"] == "Hanoi"
+    assert result["destination_info"]["found"] is True
     assert result["itinerary"] == "Day 1: Explore the old quarter."
     assert result["final_response"] == "Here is your trip."
     itinerary_input = model.calls[3][1].content
     assert json.loads(itinerary_input)["travel_plan"] == result["travel_plan"]
+
+
+@pytest.mark.asyncio
+async def test_destination_agent_extracts_only_destination_and_uses_fixed_mcp_tool() -> None:
+    model = RoutedFakeModel(
+        [
+            '{"next":"destination"}',
+            '{"destination":"Kyoto"}',
+            "Kyoto lookup-backed answer.",
+            '{"next":"FINISH","response":"Kyoto is ready."}',
+        ]
+    )
+    graph = build_graph(InMemorySaver(), chat_model=model, mcp_client=MCPToolClient(mcp))
+    result = await graph.ainvoke(
+        {
+            "messages": [{"role": "user", "content": "Tell me about Kyoto"}],
+            "user_request": "Tell me about Kyoto",
+        },
+        config={"configurable": {"thread_id": "destination-mcp"}},
+    )
+
+    assert result["destination_info"]["destination"] == "Kyoto"
+    assert result["destination_info"]["found"] is True
+    assert "only the destination" in model.calls[1][0].content
+    assert "search_destination" not in model.calls[1][0].content
+
+
+@pytest.mark.asyncio
+async def test_invalid_extracted_destination_is_rejected_before_mcp() -> None:
+    class NeverCallMCP:
+        async def search_destination(self, destination: str):
+            raise AssertionError("MCP must not be called for invalid extraction")
+
+    model = RoutedFakeModel(['{"next":"destination"}', '{"destination":"  "}'])
+    graph = build_graph(InMemorySaver(), chat_model=model, mcp_client=NeverCallMCP())
+    with pytest.raises(DestinationExtractionError):
+        await graph.ainvoke(
+            {
+                "messages": [{"role": "user", "content": "Tell me about somewhere"}],
+                "user_request": "Tell me about somewhere",
+            },
+            config={"configurable": {"thread_id": "invalid-destination"}},
+        )
+    assert len(model.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_mcp_failure_stops_destination_agent_before_answer_generation() -> None:
+    from app.mcp.client import MCPToolError
+
+    class BrokenMCP:
+        async def search_destination(self, destination: str):
+            raise MCPToolError("MCP unavailable")
+
+    model = RoutedFakeModel(['{"next":"destination"}', '{"destination":"Hanoi"}'])
+    graph = build_graph(InMemorySaver(), chat_model=model, mcp_client=BrokenMCP())
+    with pytest.raises(MCPToolError):
+        await graph.ainvoke(
+            {
+                "messages": [{"role": "user", "content": "Tell me about Hanoi"}],
+                "user_request": "Tell me about Hanoi",
+            },
+            config={"configurable": {"thread_id": "mcp-failure"}},
+        )
+    assert len(model.calls) == 2
 
 
 @pytest.mark.asyncio
@@ -158,7 +231,15 @@ async def test_selected_model_alias_is_used_for_each_graph_node(monkeypatch) -> 
     monkeypatch.setattr(
         workflow,
         "get_settings",
-        lambda: type("Settings", (), {"default_model": "travel_general"})(),
+        lambda: type(
+            "Settings",
+            (),
+            {
+                "default_model": "travel_general",
+                "travel_tools_mcp_url": "http://unused",
+                "mcp_timeout_seconds": 5,
+            },
+        )(),
     )
     graph = build_graph(InMemorySaver())
     result = await graph.ainvoke(

@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     litellm_base_url: str = "http://litellm:4000/v1"
     litellm_api_key: SecretStr
     default_model: str = "travel_general"
+    travel_tools_mcp_url: str = "http://travel-tools-mcp:8001/mcp"
+    mcp_timeout_seconds: float = 5.0
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False, extra="ignore")
 
