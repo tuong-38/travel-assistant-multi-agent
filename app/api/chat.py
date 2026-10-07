@@ -29,7 +29,10 @@ async def chat(payload: ChatRequest, request: Request) -> ChatResponse:
     model_alias = payload.model or get_settings().default_model
     try:
         result = await graph.ainvoke(
-            {"messages": [{"role": "user", "content": payload.message}]},
+            {
+                "messages": [{"role": "user", "content": payload.message}],
+                "user_request": payload.message,
+            },
             config={
                 "configurable": {
                     "thread_id": str(thread_id),
@@ -45,5 +48,5 @@ async def chat(payload: ChatRequest, request: Request) -> ChatResponse:
         )
         raise HTTPException(status_code=503, detail="Chat workflow is unavailable") from exc
 
-    reply: str = result["messages"][-1]["content"]
+    reply: str = result.get("final_response") or result["messages"][-1]["content"]
     return ChatResponse(thread_id=thread_id, reply=reply)

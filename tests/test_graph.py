@@ -1,38 +1,158 @@
+import json
+
 import pytest
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
-from app.graph import workflow
-from app.graph.workflow import build_graph
+from app.graph.workflow import PlannerOutputError, WorkflowRoutingError, build_graph
+
+TRAVEL_PLAN_JSON = (
+    '{"destination":"Hanoi","dates":"2026-11-01 to 2026-11-03",'
+    '"duration":"3 days","budget":"moderate",'
+    '"preferences":["food"],"constraints":["vegetarian"]}'
+)
 
 
-class FakeChatModel:
-    async def ainvoke(self, messages: list[dict[str, str]]) -> AIMessage:
-        assert messages[-1]["content"] == "Hello"
-        return AIMessage(content="A mocked response")
+class RoutedFakeModel:
+    def __init__(self, outputs: list[str]) -> None:
+        self.outputs = iter(outputs)
+        self.calls = []
+
+    async def ainvoke(self, messages):
+        self.calls.append(messages)
+        return AIMessage(content=next(self.outputs))
 
 
 @pytest.mark.asyncio
-async def test_graph_invokes_injected_chat_model() -> None:
-    graph = build_graph(InMemorySaver(), chat_model=FakeChatModel(), model_alias="test_model")
-    result = await graph.ainvoke(
-        {"messages": [{"role": "user", "content": "Hello"}]},
-        config={"configurable": {"thread_id": "test-thread"}},
+async def test_graph_routes_to_planner_then_finishes() -> None:
+    model = RoutedFakeModel(
+        [
+            '{"next":"planner"}',
+            TRAVEL_PLAN_JSON,
+            '{"next":"FINISH","response":"Here is your travel plan."}',
+        ]
     )
-    assert result["messages"][-1] == {"role": "assistant", "content": "A mocked response"}
+    graph = build_graph(InMemorySaver(), chat_model=model)
+    result = await graph.ainvoke(
+        {
+            "messages": [{"role": "user", "content": "Plan three days in Hanoi"}],
+            "user_request": "Plan three days in Hanoi",
+        },
+        config={"configurable": {"thread_id": "planner-thread", "model_alias": "travel_local"}},
+    )
+
+    assert result["travel_plan"] == {
+        "destination": "Hanoi",
+        "dates": "2026-11-01 to 2026-11-03",
+        "duration": "3 days",
+        "budget": "moderate",
+        "preferences": ["food"],
+        "constraints": ["vegetarian"],
+    }
+    assert result["completed_agents"] == ["planner"]
+    assert result["final_response"] == "Here is your travel plan."
+    assert result["messages"][-1]["content"] == result["final_response"]
 
 
 @pytest.mark.asyncio
-async def test_graph_selects_model_from_run_config(monkeypatch) -> None:
+async def test_graph_can_route_through_each_specialist() -> None:
+    model = RoutedFakeModel(
+        [
+            '{"next":"planner"}',
+            TRAVEL_PLAN_JSON,
+            '{"next":"itinerary"}',
+            "Day 1: Explore the old quarter.",
+            '{"next":"destination"}',
+            "The destination is known for its food and history.",
+            '{"next":"FINISH","response":"Here is your trip."}',
+        ]
+    )
+    graph = build_graph(InMemorySaver(), chat_model=model)
+    result = await graph.ainvoke(
+        {"messages": [{"role": "user", "content": "Plan a trip"}], "user_request": "Plan a trip"},
+        config={"configurable": {"thread_id": "all-specialists"}},
+    )
+
+    assert result["completed_agents"] == ["planner", "itinerary", "destination"]
+    assert result["travel_plan"]["destination"] == "Hanoi"
+    assert result["itinerary"] == "Day 1: Explore the old quarter."
+    assert result["final_response"] == "Here is your trip."
+    itinerary_input = model.calls[3][1].content
+    assert json.loads(itinerary_input)["travel_plan"] == result["travel_plan"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_planner_output_is_rejected() -> None:
+    graph = build_graph(
+        InMemorySaver(),
+        chat_model=RoutedFakeModel(['{"next":"planner"}', "not a travel plan"]),
+    )
+    with pytest.raises(PlannerOutputError):
+        await graph.ainvoke(
+            {
+                "messages": [{"role": "user", "content": "Plan a trip"}],
+                "user_request": "Plan a trip",
+            },
+            config={"configurable": {"thread_id": "invalid-plan"}},
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_output",
+    ["not json", '{"next":"arbitrary_node"}', '{"next":[]}', '{"next":"FINISH"}'],
+)
+async def test_invalid_supervisor_output_is_a_workflow_error(bad_output: str) -> None:
+    graph = build_graph(InMemorySaver(), chat_model=RoutedFakeModel([bad_output]))
+    with pytest.raises(WorkflowRoutingError):
+        await graph.ainvoke(
+            {"messages": [{"role": "user", "content": "Hello"}], "user_request": "Hello"},
+            config={"configurable": {"thread_id": "bad-route"}},
+        )
+
+
+@pytest.mark.asyncio
+async def test_same_thread_appends_each_current_request_once() -> None:
+    model = RoutedFakeModel(
+        [
+            '{"next":"FINISH","response":"First answer"}',
+            '{"next":"FINISH","response":"Second answer"}',
+        ]
+    )
+    graph = build_graph(InMemorySaver(), chat_model=model)
+    config = {"configurable": {"thread_id": "continued-thread", "model_alias": "travel_general"}}
+    for message in ("First request", "Second request"):
+        result = await graph.ainvoke(
+            {"messages": [{"role": "user", "content": message}], "user_request": message},
+            config=config,
+        )
+
+    user_messages = [item["content"] for item in result["messages"] if item["role"] == "user"]
+    assert user_messages == ["First request", "Second request"]
+    assert result["user_request"] == "Second request"
+    assert config["configurable"]["thread_id"] == "continued-thread"
+
+
+@pytest.mark.asyncio
+async def test_selected_model_alias_is_used_for_each_graph_node(monkeypatch) -> None:
+    import app.graph.workflow as workflow
+
     selected_aliases: list[str] = []
+    supervisor_calls = 0
 
-    class AliasChatModel(FakeChatModel):
-        async def ainvoke(self, messages: list[dict[str, str]]) -> AIMessage:
-            return AIMessage(content="Response for selected model")
+    class AliasModel:
+        async def ainvoke(self, messages):
+            nonlocal supervisor_calls
+            if "Choose exactly one next step" in messages[0].content:
+                supervisor_calls += 1
+                if supervisor_calls == 1:
+                    return AIMessage(content='{"next":"planner"}')
+                return AIMessage(content='{"next":"FINISH","response":"Done"}')
+            return AIMessage(content=TRAVEL_PLAN_JSON)
 
-    def fake_get_chat_model(model_alias: str) -> AliasChatModel:
+    def fake_get_chat_model(model_alias: str):
         selected_aliases.append(model_alias)
-        return AliasChatModel()
+        return AliasModel()
 
     monkeypatch.setattr(workflow, "get_chat_model", fake_get_chat_model)
     monkeypatch.setattr(
@@ -41,11 +161,12 @@ async def test_graph_selects_model_from_run_config(monkeypatch) -> None:
         lambda: type("Settings", (), {"default_model": "travel_general"})(),
     )
     graph = build_graph(InMemorySaver())
-
     result = await graph.ainvoke(
-        {"messages": [{"role": "user", "content": "Hello"}]},
-        config={"configurable": {"thread_id": "test-thread", "model_alias": "travel_local"}},
+        {
+            "messages": [{"role": "user", "content": "Plan a trip"}],
+            "user_request": "Plan a trip",
+        },
+        config={"configurable": {"thread_id": "alias-thread", "model_alias": "travel_local"}},
     )
-
-    assert result["messages"][-1]["content"] == "Response for selected model"
-    assert selected_aliases == ["travel_local"]
+    assert result["final_response"] == "Done"
+    assert selected_aliases == ["travel_local", "travel_local", "travel_local"]

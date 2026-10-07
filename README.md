@@ -1,6 +1,6 @@
 # Travel Assistant Multi-Agent System
 
-The project keeps the Phase 0 API and one-node LangGraph workflow, and routes chat through LangChain's `ChatOpenAI` client to a local LiteLLM gateway. LiteLLM provides the configured `travel_general` and `travel_local` aliases. No multi-agent orchestration is present.
+The project uses a supervisor-led LangGraph workflow with destination, travel planner, and itinerary specialists. All model calls go through LangChain's `ChatOpenAI` client to the LiteLLM gateway, which provides the configured `travel_general` and `travel_local` aliases.
 
 ## Requirements
 
@@ -46,7 +46,7 @@ Example request:
 }
 ```
 
-`model` and `thread_id` are optional. If `model` is omitted, the API uses `DEFAULT_MODEL`; the alias is passed through LiteLLM without automatic fallback. The API returns a generated UUID when `thread_id` is omitted. The graph remains `START → chat_node → END`. Tests use fake chat models and do not call Gemini or Ollama.
+`model` and `thread_id` are optional. If `model` is omitted, the API uses `DEFAULT_MODEL`; the alias is passed through LiteLLM without automatic fallback. The API returns a generated UUID when `thread_id` is omitted. The supervisor dynamically routes to allowed specialists and validates each proposed route before graph execution. PostgreSQL checkpoints conversation messages and structured travel state by thread ID. Tests use fake chat models and do not call Gemini or Ollama.
 
 ## Checks
 
