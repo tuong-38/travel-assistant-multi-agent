@@ -45,17 +45,18 @@ class DeterministicTravelModel:
         self.supervisor_calls = 0
         self.destination_info_seen: dict | None = None
         self.planner_input: dict | None = None
+        self.planner_calls = 0
         self.itinerary_input: dict | None = None
         self.destination_answer = ""
 
     async def ainvoke(self, messages: list) -> AIMessage:
         system_prompt = messages[0].content
         if "Choose exactly one next step" in system_prompt:
-            routes = ["destination", "planner", "itinerary", "FINISH", "FINISH"]
+            routes = ["destination", "planner", "FINISH", "FINISH"]
             route = routes[self.supervisor_calls]
             self.supervisor_calls += 1
             response = "The Hanoi plan is ready." if route == "FINISH" else None
-            if self.supervisor_calls == 5:
+            if self.supervisor_calls == 4:
                 response = "Follow-up received."
             decision = {"next": route}
             if response is not None:
@@ -76,7 +77,11 @@ class DeterministicTravelModel:
 
         if "You are the travel planner" in system_prompt:
             self.planner_input = request
-            return AIMessage(content=json.dumps(TRAVEL_PLAN))
+            self.planner_calls += 1
+            plan = dict(TRAVEL_PLAN)
+            if self.planner_calls > 1:
+                plan["budget"] = request["plan_revision_feedback"]["budget"]
+            return AIMessage(content=json.dumps(plan))
 
         if "You are the itinerary specialist" in system_prompt:
             self.itinerary_input = request
@@ -110,6 +115,9 @@ class RecordingGraph:
         self.results.append(result)
         self.configs.append(config)
         return result
+
+    async def aget_state(self, config: dict):
+        return await self.graph.aget_state(config)
 
 
 def _available_local_port() -> int:
@@ -201,6 +209,7 @@ def test_phase4_fastapi_graph_real_mcp_e2e(monkeypatch) -> None:
         api = FastAPI()
         api.include_router(chat_router, prefix="/api/v1")
         api.state.graph = recording_graph
+        api.state.testing = True
         thread_id = str(uuid4())
 
         with TestClient(api) as client:
@@ -213,16 +222,42 @@ def test_phase4_fastapi_graph_real_mcp_e2e(monkeypatch) -> None:
                 },
             )
             assert first_response.status_code == 200, first_response.text
-            assert first_response.json() == {
+            first_body = first_response.json()
+            assert first_body["thread_id"] == thread_id
+            assert first_body["reply"] == "Your travel plan is ready for review."
+            assert first_body["status"] == "interrupted"
+            initial_interrupt_id = first_body["pending_approval"]["interrupt_id"]
+
+            modify_response = client.post(
+                f"/api/v1/chat/{thread_id}/resume",
+                json={
+                    "interrupt_id": initial_interrupt_id,
+                    "decision": "modify",
+                    "changes": {"budget": "premium"},
+                },
+            )
+            assert modify_response.status_code == 200, modify_response.text
+            modified_body = modify_response.json()
+            assert modified_body["status"] == "interrupted"
+            assert modified_body["pending_approval"]["plan_revision_count"] == 1
+            assert modified_body["pending_approval"]["travel_plan"]["budget"] == "premium"
+            modified_interrupt_id = modified_body["pending_approval"]["interrupt_id"]
+
+            approve_response = client.post(
+                f"/api/v1/chat/{thread_id}/resume",
+                json={"interrupt_id": modified_interrupt_id, "decision": "approve"},
+            )
+            assert approve_response.status_code == 200, approve_response.text
+            assert approve_response.json() == {
                 "thread_id": thread_id,
                 "reply": "The Hanoi plan is ready.",
             }
 
-            first_state = recording_graph.results[0]
+            first_state = recording_graph.results[-1]
             assert first_state["current_agent"] == "FINISH"
             assert first_state["final_response"] == "The Hanoi plan is ready."
             assert first_state["destination_info"] == DESTINATION_INFO
-            assert first_state["travel_plan"] == TRAVEL_PLAN
+            assert first_state["travel_plan"]["budget"] == "premium"
             assert first_state["itinerary"] == "Day 1: Explore the Old Quarter."
             assert first_state["completed_agents"] == ["destination", "planner", "itinerary"]
             assert mcp_client.destinations == ["Hanoi"]
@@ -234,7 +269,8 @@ def test_phase4_fastapi_graph_real_mcp_e2e(monkeypatch) -> None:
                 for item in model.planner_input["conversation"]
             )
             assert model.itinerary_input is not None
-            assert model.itinerary_input["travel_plan"] == TRAVEL_PLAN
+            assert model.itinerary_input["travel_plan"]["budget"] == "premium"
+            assert model.planner_calls == 2
 
             second_response = client.post(
                 "/api/v1/chat",
@@ -250,7 +286,7 @@ def test_phase4_fastapi_graph_real_mcp_e2e(monkeypatch) -> None:
                 "reply": "Follow-up received.",
             }
 
-        second_state = recording_graph.results[1]
+        second_state = recording_graph.results[-1]
         user_messages = [
             message["content"] for message in second_state["messages"] if message["role"] == "user"
         ]
@@ -260,6 +296,8 @@ def test_phase4_fastapi_graph_real_mcp_e2e(monkeypatch) -> None:
         ]
         assert second_state["user_request"] == "Add a note about the first day"
         assert [config["configurable"]["thread_id"] for config in recording_graph.configs] == [
+            thread_id,
+            thread_id,
             thread_id,
             thread_id,
         ]

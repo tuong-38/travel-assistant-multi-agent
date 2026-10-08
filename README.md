@@ -48,6 +48,20 @@ Example request:
 
 `model` and `thread_id` are optional. If `model` is omitted, the API uses `DEFAULT_MODEL`; the alias is passed through LiteLLM without automatic fallback. The API returns a generated UUID when `thread_id` is omitted. The supervisor dynamically routes to allowed specialists and validates each proposed route before graph execution. PostgreSQL checkpoints conversation messages and structured travel state by thread ID. Tests use fake chat models and do not call Gemini or Ollama.
 
+Planning requests pause after the planner creates a structured travel plan and before an itinerary is generated. The response is additive and includes `status: "interrupted"` plus `pending_approval` with the `interrupt_id`, current `travel_plan`, `plan_revision_count`, and `max_plan_revisions`.
+
+Resume the same thread with `POST /api/v1/chat/{thread_id}/resume` and the pending `interrupt_id`. Choose `approve`, `modify`, or `reject`. A `modify` decision requires a non-empty `changes` object containing only TravelPlan fields; approve and reject do not accept changes. The API permits up to three modifications. Each modification returns a new pending approval and interrupt ID. An approved plan continues to itinerary generation; a rejected plan ends the workflow. While approval is pending, `/api/v1/chat` returns 409 for that thread. Completed chat responses retain the original `{ "thread_id", "reply" }` shape.
+
+Example modification:
+
+```json
+{
+  "interrupt_id": "<pending interrupt id>",
+  "decision": "modify",
+  "changes": { "budget": "moderate", "preferences": ["food"] }
+}
+```
+
 ## Checks
 
 ```sh

@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from typing import Any, Literal, cast
 
@@ -6,8 +7,10 @@ import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import interrupt
 
 from app.core.config import get_settings
+from app.graph.hitl import MAX_PLAN_REVISIONS, ResumeDecision, apply_plan_patch
 from app.graph.state import DestinationInfo, TravelPlan, TravelState
 from app.llm.factory import get_chat_model
 from app.mcp.client import MCPToolClient
@@ -24,7 +27,9 @@ SPECIALIST_PROMPTS = {
         "You are the travel planner. Organize the user's destination, dates, duration, "
         "budget, travel style, and constraints. Return only JSON with exactly these keys: "
         "destination, dates, duration, budget, preferences, constraints. Use strings or null "
-        "for the first four values and arrays of strings for preferences and constraints."
+        "for the first four values and arrays of strings for preferences and constraints. "
+        "When normalized plan_revision_feedback is present, incorporate those changes and "
+        "preserve the other valid plan details."
     ),
     "itinerary": (
         "You are the itinerary specialist. Use the structured travel plan to create a "
@@ -43,6 +48,18 @@ class PlannerOutputError(ValueError):
 
 class DestinationExtractionError(ValueError):
     """Raised when the destination-only extraction is malformed."""
+
+
+def _is_planning_request(user_request: str) -> bool:
+    """Recognize explicit itinerary/planning requests before enforcing destination lookup."""
+    return bool(
+        re.search(
+            r"\b(plan|planning|itinerary|trip|travel|vacation|holiday)\b|"
+            r"lịch trình|kế hoạch|du lịch|chuyến đi",
+            user_request,
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 def _parse_destination_extraction(content: Any) -> str | None:
@@ -149,6 +166,20 @@ def build_graph(
             raise WorkflowRoutingError("Supervisor attempted to repeat a completed specialist")
         if route == "itinerary" and not state.get("travel_plan"):
             raise WorkflowRoutingError("Supervisor selected itinerary before a travel plan exists")
+        if "itinerary" in completed and route != "FINISH":
+            raise WorkflowRoutingError("Supervisor must finish after itinerary generation")
+        if route == "itinerary" and state.get("hitl_decision") != "approve":
+            raise WorkflowRoutingError("Supervisor selected itinerary before plan approval")
+        if (
+            route == "planner"
+            and _is_planning_request(state.get("user_request", ""))
+            and not state.get("destination_info")
+        ):
+            if "destination" in completed:
+                raise WorkflowRoutingError(
+                    "Planning requires destination information, but destination lookup is complete"
+                )
+            route = "destination"
         logger.info(
             "supervisor_routed",
             route=route,
@@ -229,35 +260,74 @@ def build_graph(
         agent = state["current_agent"]
         if agent not in {"planner", "itinerary"}:
             raise WorkflowRoutingError("Invalid specialist node selection")
+        planner_context = {
+            "user_request": state.get("user_request", ""),
+            "travel_plan": state.get("travel_plan"),
+            "plan_revision_feedback": state.get("plan_revision_feedback"),
+            "itinerary": state.get("itinerary"),
+            "conversation": state.get("messages", []),
+        }
         response = await model_for(config).ainvoke(
             [
                 SystemMessage(content=SPECIALIST_PROMPTS[agent]),
-                HumanMessage(
-                    content=json.dumps(
-                        {
-                            "user_request": state.get("user_request", ""),
-                            "travel_plan": state.get("travel_plan"),
-                            "itinerary": state.get("itinerary"),
-                            "conversation": state.get("messages", []),
-                        },
-                        ensure_ascii=False,
-                    )
-                ),
+                HumanMessage(content=json.dumps(planner_context, ensure_ascii=False)),
             ]
         )
         if not isinstance(response.content, str):
             raise TypeError("Agent model returned non-text content")
         travel_plan = _parse_travel_plan(response.content) if agent == "planner" else None
-        completed = [*state.get("completed_agents", []), agent]
+        completed = state.get("completed_agents", [])
+        if agent not in completed:
+            completed = [*completed, agent]
         update: dict[str, Any] = {
             "messages": [{"role": "assistant", "content": response.content}],
             "completed_agents": completed,
         }
         if agent == "planner":
             update["travel_plan"] = travel_plan
+            update["plan_revision_feedback"] = None
         elif agent == "itinerary":
             update["itinerary"] = response.content
         return update
+
+    async def approval(state: TravelState) -> dict[str, Any]:
+        decision_value = interrupt(
+            {
+                "type": "travel_plan_approval",
+                "approval_type": "travel_plan",
+                "travel_plan": state.get("travel_plan"),
+                "plan_revision_count": state.get("plan_revision_count", 0),
+                "max_plan_revisions": MAX_PLAN_REVISIONS,
+            }
+        )
+        try:
+            decision = ResumeDecision.model_validate(decision_value)
+        except Exception as exc:
+            raise ValueError("Invalid approval resume value") from exc
+        if decision.decision == "modify":
+            revision_count = state.get("plan_revision_count", 0)
+            if revision_count >= MAX_PLAN_REVISIONS:
+                raise ValueError("Maximum plan revisions exceeded")
+            plan = state.get("travel_plan")
+            if plan is None or decision.changes is None:
+                raise ValueError("Cannot modify a missing travel plan")
+            updated_plan = apply_plan_patch(plan, decision.changes)
+            return {
+                "travel_plan": updated_plan,
+                "plan_revision_count": revision_count + 1,
+                "plan_revision_feedback": decision.changes.model_dump(exclude_unset=True),
+                "hitl_decision": "modify",
+                "current_agent": "planner",
+            }
+        if decision.decision == "reject":
+            reply = "The travel plan was rejected."
+            return {
+                "hitl_decision": "reject",
+                "current_agent": "REJECTED",
+                "final_response": reply,
+                "messages": [{"role": "assistant", "content": reply}],
+            }
+        return {"hitl_decision": "approve", "current_agent": "itinerary"}
 
     def route_after_supervisor(
         state: TravelState,
@@ -270,12 +340,25 @@ def build_graph(
     builder.add_node("destination", destination_agent)
     builder.add_node("planner", specialist)
     builder.add_node("itinerary", specialist)
+    builder.add_node("approval", approval)
     builder.add_edge(START, "supervisor")
     builder.add_conditional_edges(
         "supervisor",
         route_after_supervisor,
         {"destination": "destination", "planner": "planner", "itinerary": "itinerary", "END": END},
     )
-    for agent in SPECIALIST_PROMPTS:
-        builder.add_edge(agent, "supervisor")
+    builder.add_edge("destination", "supervisor")
+    builder.add_edge("planner", "approval")
+    builder.add_conditional_edges(
+        "approval",
+        lambda state: (
+            "planner"
+            if state["hitl_decision"] == "modify"
+            else END
+            if state["hitl_decision"] == "reject"
+            else "itinerary"
+        ),
+        {"planner": "planner", "itinerary": "itinerary", END: END},
+    )
+    builder.add_edge("itinerary", "supervisor")
     return builder.compile(checkpointer=checkpointer)

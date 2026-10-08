@@ -29,3 +29,7 @@ class TravelState(TypedDict, total=False):
     current_agent: str
     completed_agents: list[str]
     final_response: str
+    hitl_decision: str
+    plan_revision_count: int
+    plan_revision_feedback: dict[str, object] | None
+    model_alias: str
