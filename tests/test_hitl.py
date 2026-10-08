@@ -253,10 +253,10 @@ def test_modify_limit_and_approve_preserve_thread(monkeypatch) -> None:
         json={"interrupt_id": interrupt_id, "decision": "approve"},
     )
     assert approved.status_code == 200
-    assert approved.json() == {"thread_id": thread_id, "reply": "Trip complete"}
+    assert approved.json() == {"thread_id": thread_id, "reply": "Day 1: Hanoi"}
     assert model.planner_calls == 4
     assert model.itinerary_calls == 1
-    assert model.supervisor_calls == 3
+    assert model.supervisor_calls == 2
     assert mcp_client.calls == 1
 
     replay = client.post(

@@ -14,7 +14,7 @@ The project uses a supervisor-led LangGraph workflow with destination, travel pl
 1. Copy `.env.example` to `.env`.
 2. Set `GEMINI_API_KEY` and generate one strong random key for both `LITELLM_MASTER_KEY` and `LITELLM_API_KEY`. The shared admin-level credential is for local/internal development only. Keep `.env` out of Git.
 3. Install locked dependencies with `uv sync --locked`.
-4. Start the database, gateway, and API with `docker compose up --build`.
+4. Start the database, gateway, Redis, API, MCP service, and worker with `docker compose up --build`.
 
 LiteLLM is DB-less. Its host port is bound to `127.0.0.1:4000`; the API reaches it through the private Compose network. The Gemini key and LiteLLM master key are passed as runtime environment variables and are not baked into the application image or LiteLLM config file.
 
@@ -61,6 +61,18 @@ Example modification:
   "changes": { "budget": "moderate", "preferences": ["food"] }
 }
 ```
+
+### Asynchronous jobs
+
+The synchronous endpoints above remain available with their existing response contract. For callers that should not hold an HTTP request open during graph execution, Phase 6 adds:
+
+- `POST /api/v1/chat/jobs` — accepts the same chat request and returns `202` with `job_id`, `thread_id`, and `status: "queued"`.
+- `POST /api/v1/chat/{thread_id}/resume/jobs` — accepts the existing resume decision and returns a queued job. The URL thread ID is authoritative, and resume does not add a user message.
+- `GET /api/v1/jobs/{job_id}` — returns operational job status and reconciles workflow details from the PostgreSQL checkpoint.
+
+Redis Streams and a separate worker deliver jobs at least once. Redis job statuses (`queued`, `running`, `succeeded`, `failed`) describe queue execution only; PostgreSQL/LangGraph checkpoints remain authoritative for workflow progress, results, and pending approval. The Redis service uses AOF with `appendfsync everysec` and a named volume; this accepts a non-zero disaster recovery point objective. A worker recovery can repeat the deterministic, read-only destination lookup if it crashes during that MCP node before its graph checkpoint is written; exactly-once MCP execution is not promised.
+
+The worker heartbeats its pending stream entry every 30 seconds and claims entries idle for 300 seconds. LangGraph 1.2.13 recovery was exercised with deterministic in-memory graphs: active interrupts re-enter the interrupted node on resume, checkpointed preceding nodes are not replayed after a later node failure, and a failed node is re-entered. The heartbeat keeps an active delivery from reaching the claim idle threshold during long graph calls; the PostgreSQL per-thread advisory lock prevents concurrent graph execution for one thread.
 
 ## Checks
 

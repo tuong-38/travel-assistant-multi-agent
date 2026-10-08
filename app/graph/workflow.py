@@ -126,6 +126,20 @@ def _parse_supervisor_decision(content: Any) -> tuple[str, str | None]:
     return cast(str, route), response
 
 
+def _safe_supervisor_decision(content: Any) -> str:
+    """Return only an allowlisted route or a non-sensitive outcome category."""
+    if not isinstance(content, str):
+        return "non_text"
+    try:
+        decision = json.loads(content)
+    except json.JSONDecodeError:
+        return "malformed"
+    if not isinstance(decision, dict):
+        return "invalid"
+    route = decision.get("next")
+    return route if isinstance(route, str) and route in ALLOWED_ROUTES else "invalid"
+
+
 def build_graph(
     checkpointer: Any,
     chat_model: Any | None = None,
@@ -143,6 +157,15 @@ def build_graph(
         return chat_model if chat_model is not None else get_chat_model(alias)
 
     async def supervisor(state: TravelState, config: RunnableConfig) -> dict[str, Any]:
+        completed = state.get("completed_agents", [])
+        itinerary = state.get("itinerary")
+        if "itinerary" in completed and isinstance(itinerary, str) and itinerary.strip():
+            return {
+                "current_agent": "FINISH",
+                "final_response": itinerary,
+                "messages": [{"role": "assistant", "content": itinerary}],
+            }
+
         started_at = time.perf_counter()
         context = {
             "user_request": state.get("user_request", ""),
@@ -160,8 +183,13 @@ def build_graph(
         response = await model_for(config).ainvoke(
             [SystemMessage(content=prompt), *state.get("messages", [])]
         )
+        if "destination" in completed:
+            logger.info(
+                "supervisor_decision_after_destination",
+                route_decision=_safe_supervisor_decision(response.content),
+                thread_id=config.get("configurable", {}).get("thread_id"),
+            )
         route, final_response = _parse_supervisor_decision(response.content)
-        completed = state.get("completed_agents", [])
         if route in completed:
             raise WorkflowRoutingError("Supervisor attempted to repeat a completed specialist")
         if route == "itinerary" and not state.get("travel_plan"):

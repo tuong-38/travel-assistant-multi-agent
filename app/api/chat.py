@@ -1,5 +1,4 @@
 import asyncio
-import sys
 from contextlib import asynccontextmanager
 from typing import Any, Literal
 from uuid import UUID, uuid4
@@ -9,8 +8,10 @@ from fastapi import APIRouter, HTTPException, Request
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
+from app.core.advisory_lock import AdvisoryLockError, thread_advisory_lock
 from app.core.config import get_settings
 from app.graph.hitl import MAX_PLAN_REVISIONS, ResumeDecision
+from app.graph.state import new_chat_execution_input
 
 _thread_locks: dict[str, asyncio.Lock] = {}
 
@@ -43,7 +44,7 @@ def _has_checkpoint(snapshot: Any) -> bool:
 
 @asynccontextmanager
 async def _thread_resume_lock(request: Request, thread_id: str):
-    """Serialize resumes with a PostgreSQL advisory lock in production."""
+    """Serialize graph operations with a PostgreSQL advisory lock in production."""
     pool = getattr(request.app.state, "db_pool", None)
     if pool is None:
         if getattr(request.app.state, "testing", False) is True:
@@ -53,41 +54,13 @@ async def _thread_resume_lock(request: Request, thread_id: str):
             return
         raise HTTPException(status_code=503, detail="Resume locking is unavailable")
 
-    async with pool.connection() as connection:
-        try:
-            await connection.execute(
-                "SELECT pg_advisory_lock(hashtextextended(%s, 0))", (thread_id,)
-            )
-        except BaseException:
-            await _discard_connection(connection)
-            raise
-        try:
-            yield
-        finally:
-            original_error = sys.exception()
-            try:
-                await connection.execute(
-                    "SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (thread_id,)
-                )
-            except BaseException as unlock_error:
-                await _discard_connection(connection)
-                logger.error(
-                    "resume_advisory_unlock_failed",
-                    thread_id=thread_id,
-                    error_type=type(unlock_error).__name__,
-                )
-                if original_error is None:
-                    raise HTTPException(
-                        status_code=503, detail="Resume lock release failed"
-                    ) from unlock_error
-
-
-async def _discard_connection(connection: Any) -> None:
-    """Close a session whose advisory-lock state is uncertain so the pool discards it."""
     try:
-        await connection.close()
-    except BaseException as close_error:
-        logger.error("resume_connection_discard_failed", error_type=type(close_error).__name__)
+        async with thread_advisory_lock(pool, thread_id):
+            yield
+    except AdvisoryLockError as exc:
+        raise HTTPException(
+            status_code=503, detail="PostgreSQL thread locking is unavailable"
+        ) from exc
 
 
 @router.post("", response_model=ChatResponse, response_model_exclude_none=True)
@@ -97,21 +70,19 @@ async def chat(payload: ChatRequest, request: Request) -> ChatResponse:
     model_alias = payload.model or get_settings().default_model
     config = {"configurable": {"thread_id": str(thread_id), "model_alias": model_alias}}
     try:
-        if hasattr(graph, "aget_state"):
-            snapshot = await graph.aget_state(config)
-            if _active_interrupt(snapshot) is not None:
-                raise HTTPException(
-                    status_code=409,
-                    detail="This thread is awaiting approval; use the resume endpoint",
-                )
-        result = await graph.ainvoke(
-            {
-                "messages": [{"role": "user", "content": payload.message}],
-                "user_request": payload.message,
-                "model_alias": model_alias,
-            },
-            config=config,
-        )
+        async with _thread_resume_lock(request, str(thread_id)):
+            if hasattr(graph, "aget_state"):
+                snapshot = await graph.aget_state(config)
+                if _active_interrupt(snapshot) is not None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="This thread is awaiting approval; use the resume endpoint",
+                    )
+            result = await graph.ainvoke(
+                new_chat_execution_input(payload.message, model_alias),
+                config=config,
+            )
+            snapshot = await graph.aget_state(config) if hasattr(graph, "aget_state") else None
     except HTTPException:
         raise
     except Exception as exc:
@@ -122,15 +93,6 @@ async def chat(payload: ChatRequest, request: Request) -> ChatResponse:
         )
         raise HTTPException(status_code=503, detail="Chat workflow is unavailable") from exc
 
-    try:
-        snapshot = await graph.aget_state(config) if hasattr(graph, "aget_state") else None
-    except Exception as exc:
-        logger.error(
-            "chat_checkpoint_read_failed",
-            thread_id=str(thread_id),
-            error_type=type(exc).__name__,
-        )
-        raise HTTPException(status_code=503, detail="Chat workflow is unavailable") from exc
     active_interrupt = _active_interrupt(snapshot) if snapshot is not None else None
     if active_interrupt is not None:
         values = snapshot.values

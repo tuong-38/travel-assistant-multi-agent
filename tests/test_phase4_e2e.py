@@ -52,11 +52,11 @@ class DeterministicTravelModel:
     async def ainvoke(self, messages: list) -> AIMessage:
         system_prompt = messages[0].content
         if "Choose exactly one next step" in system_prompt:
-            routes = ["destination", "planner", "FINISH", "FINISH"]
+            routes = ["destination", "planner", "FINISH"]
             route = routes[self.supervisor_calls]
             self.supervisor_calls += 1
             response = "The Hanoi plan is ready." if route == "FINISH" else None
-            if self.supervisor_calls == 4:
+            if self.supervisor_calls == 3:
                 response = "Follow-up received."
             decision = {"next": route}
             if response is not None:
@@ -250,12 +250,12 @@ def test_phase4_fastapi_graph_real_mcp_e2e(monkeypatch) -> None:
             assert approve_response.status_code == 200, approve_response.text
             assert approve_response.json() == {
                 "thread_id": thread_id,
-                "reply": "The Hanoi plan is ready.",
+                "reply": "Day 1: Explore the Old Quarter.",
             }
 
             first_state = recording_graph.results[-1]
             assert first_state["current_agent"] == "FINISH"
-            assert first_state["final_response"] == "The Hanoi plan is ready."
+            assert first_state["final_response"] == "Day 1: Explore the Old Quarter."
             assert first_state["destination_info"] == DESTINATION_INFO
             assert first_state["travel_plan"]["budget"] == "premium"
             assert first_state["itinerary"] == "Day 1: Explore the Old Quarter."

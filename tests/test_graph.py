@@ -4,7 +4,9 @@ import pytest
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
+from structlog.testing import capture_logs
 
+from app.graph.state import new_chat_execution_input
 from app.graph.workflow import (
     DestinationExtractionError,
     PlannerOutputError,
@@ -41,7 +43,6 @@ async def test_graph_routes_to_planner_then_finishes() -> None:
             '{"next":"planner"}',
             TRAVEL_PLAN_JSON,
             "Day 1: Hanoi.",
-            '{"next":"FINISH","response":"Here is your travel plan."}',
         ]
     )
     graph = build_graph(InMemorySaver(), chat_model=model, mcp_client=MCPToolClient(mcp))
@@ -71,7 +72,7 @@ async def test_graph_routes_to_planner_then_finishes() -> None:
         "constraints": ["vegetarian"],
     }
     assert result["completed_agents"] == ["destination", "planner", "itinerary"]
-    assert result["final_response"] == "Here is your travel plan."
+    assert result["final_response"] == result["itinerary"]
     assert result["messages"][-1]["content"] == result["final_response"]
 
 
@@ -85,7 +86,6 @@ async def test_graph_can_route_through_each_specialist() -> None:
             '{"next":"planner"}',
             TRAVEL_PLAN_JSON,
             "Day 1: Explore the old quarter.",
-            '{"next":"FINISH","response":"Here is your trip."}',
         ]
     )
     graph = build_graph(InMemorySaver(), chat_model=model, mcp_client=MCPToolClient(mcp))
@@ -109,7 +109,7 @@ async def test_graph_can_route_through_each_specialist() -> None:
     assert result["travel_plan"]["destination"] == "Hanoi"
     assert result["destination_info"]["found"] is True
     assert result["itinerary"] == "Day 1: Explore the old quarter."
-    assert result["final_response"] == "Here is your trip."
+    assert result["final_response"] == result["itinerary"]
     itinerary_input = model.calls[5][1].content
     assert json.loads(itinerary_input)["travel_plan"] == result["travel_plan"]
 
@@ -235,35 +235,53 @@ async def test_approval_node_rejects_invalid_direct_graph_resume() -> None:
 
 
 @pytest.mark.asyncio
-async def test_supervisor_cannot_continue_after_itinerary() -> None:
+async def test_supervisor_finishes_deterministically_after_itinerary() -> None:
+    model = RoutedFakeModel(
+        [
+            '{"next":"destination"}',
+            '{"destination":"Hanoi"}',
+            "Hanoi lookup result.",
+            '{"next":"planner"}',
+            TRAVEL_PLAN_JSON,
+            "Day 1: Explore the old quarter.",
+        ]
+    )
     graph = build_graph(
         InMemorySaver(),
-        chat_model=RoutedFakeModel(
-            ['{"next":"planner"}', TRAVEL_PLAN_JSON, "Day 1", '{"next":"destination"}']
-        ),
+        chat_model=model,
+        mcp_client=MCPToolClient(mcp),
     )
     config = {"configurable": {"thread_id": "route-after-itinerary"}}
-    await graph.ainvoke(
+    interrupted = await graph.ainvoke(
         {
-            "messages": [{"role": "user", "content": "Plan a trip"}],
-            "user_request": "Plan a trip",
-            "destination_info": {
-                "destination": "Hanoi",
-                "found": True,
-                "summary": "Known",
-                "activities": [],
-            },
-            "completed_agents": ["destination"],
+            "messages": [{"role": "user", "content": "Plan a trip to Hanoi"}],
+            "user_request": "Plan a trip to Hanoi",
         },
         config=config,
     )
+    assert interrupted["destination_info"]["destination"] == "Hanoi"
+    assert interrupted["completed_agents"] == ["destination", "planner"]
     snapshot = await graph.aget_state(config)
     interrupt_id = snapshot.interrupts[0].id
-    with pytest.raises(WorkflowRoutingError):
-        await graph.ainvoke(
-            Command(resume={interrupt_id: {"interrupt_id": interrupt_id, "decision": "approve"}}),
-            config=config,
-        )
+    supervisor_calls_before_resume = sum(
+        "Choose exactly one next step" in messages[0].content for messages in model.calls
+    )
+    assert supervisor_calls_before_resume == 2
+    result = await graph.ainvoke(
+        Command(resume={interrupt_id: {"interrupt_id": interrupt_id, "decision": "approve"}}),
+        config=config,
+    )
+    final_snapshot = await graph.aget_state(config)
+    assert result["current_agent"] == "FINISH"
+    assert result["final_response"] == "Day 1: Explore the old quarter."
+    assert result["completed_agents"] == ["destination", "planner", "itinerary"]
+    supervisor_calls_after_resume = sum(
+        "Choose exactly one next step" in messages[0].content for messages in model.calls
+    )
+    assert supervisor_calls_after_resume == supervisor_calls_before_resume
+    assert len(model.calls) == 6
+    assert final_snapshot.next == ()
+    assert final_snapshot.interrupts == ()
 
 
 @pytest.mark.asyncio
@@ -278,6 +296,44 @@ async def test_invalid_supervisor_output_is_a_workflow_error(bad_output: str) ->
             {"messages": [{"role": "user", "content": "Hello"}], "user_request": "Hello"},
             config={"configurable": {"thread_id": "bad-route"}},
         )
+
+
+@pytest.mark.asyncio
+async def test_supervisor_logs_safe_decision_after_destination(monkeypatch) -> None:
+    import app.graph.workflow as workflow
+
+    sensitive_route = "private-user@example.com"
+    monkeypatch.setattr(
+        workflow,
+        "get_settings",
+        lambda: type(
+            "Settings",
+            (),
+            {
+                "default_model": "travel_general",
+                "travel_tools_mcp_url": "http://unused",
+                "mcp_timeout_seconds": 5,
+            },
+        )(),
+    )
+    graph = build_graph(
+        InMemorySaver(),
+        chat_model=RoutedFakeModel([json.dumps({"next": sensitive_route})]),
+    )
+    with capture_logs() as logs:
+        with pytest.raises(WorkflowRoutingError):
+            await graph.ainvoke(
+                {
+                    "messages": [{"role": "user", "content": "Tell me about Hanoi"}],
+                    "user_request": "Tell me about Hanoi",
+                    "completed_agents": ["destination"],
+                },
+                config={"configurable": {"thread_id": "safe-log-thread"}},
+            )
+
+    event = next(log for log in logs if log["event"] == "supervisor_decision_after_destination")
+    assert event["route_decision"] == "invalid"
+    assert sensitive_route not in str(event)
 
 
 @pytest.mark.asyncio
@@ -300,6 +356,62 @@ async def test_same_thread_appends_each_current_request_once() -> None:
     assert user_messages == ["First request", "Second request"]
     assert result["user_request"] == "Second request"
     assert config["configurable"]["thread_id"] == "continued-thread"
+
+
+@pytest.mark.asyncio
+async def test_new_execution_clears_old_workflow_state_and_preserves_history() -> None:
+    model = RoutedFakeModel(
+        [
+            '{"next":"planner"}',
+            TRAVEL_PLAN_JSON,
+            "Day 1: Hanoi.",
+            '{"next":"FINISH","response":"Follow-up received."}',
+        ]
+    )
+    graph = build_graph(InMemorySaver(), chat_model=model)
+    config = {"configurable": {"thread_id": "execution-boundary"}}
+    first_request = "Plan a trip to Hanoi"
+    interrupted = await graph.ainvoke(
+        {
+            "messages": [{"role": "user", "content": first_request}],
+            "user_request": first_request,
+            "destination_info": {
+                "destination": "Hanoi",
+                "found": True,
+                "summary": "Known",
+                "activities": [],
+            },
+            "completed_agents": ["destination"],
+        },
+        config=config,
+    )
+    assert interrupted["completed_agents"] == ["destination", "planner"]
+    snapshot = await graph.aget_state(config)
+    interrupt_id = snapshot.interrupts[0].id
+    completed = await graph.ainvoke(
+        Command(resume={interrupt_id: {"interrupt_id": interrupt_id, "decision": "approve"}}),
+        config=config,
+    )
+    assert completed["completed_agents"] == ["destination", "planner", "itinerary"]
+
+    follow_up = "Add a note about the first day"
+    result = await graph.ainvoke(
+        new_chat_execution_input(follow_up, "travel_local"),
+        config=config,
+    )
+
+    user_messages = [
+        message["content"] for message in result["messages"] if message["role"] == "user"
+    ]
+    assert user_messages == [first_request, follow_up]
+    assert result["user_request"] == follow_up
+    assert result["completed_agents"] == []
+    assert result["destination_info"] is None
+    assert result["travel_plan"] is None
+    assert result["itinerary"] is None
+    assert result["final_response"] == "Follow-up received."
+    assert result["current_agent"] == "FINISH"
+    assert len(model.calls) == 4
 
 
 @pytest.mark.asyncio
@@ -362,6 +474,7 @@ async def test_selected_model_alias_is_used_for_each_graph_node(monkeypatch) -> 
         Command(resume={interrupt_id: {"interrupt_id": interrupt_id, "decision": "approve"}}),
         config=config,
     )
-    assert result["final_response"] == "Done"
+    assert result["final_response"] == result["itinerary"]
     assert initial["travel_plan"]["destination"] == "Hanoi"
-    assert selected_aliases == ["travel_local"] * 4
+    assert supervisor_calls == 1
+    assert selected_aliases == ["travel_local"] * 3

@@ -27,6 +27,7 @@ def test_chat_generates_thread_id(monkeypatch) -> None:
     app = create_app()
     graph = FakeGraph()
     app.state.graph = graph
+    app.state.testing = True
     response = TestClient(app).post("/api/v1/chat", json={"message": "Hello"})
 
     assert response.status_code == 200
@@ -40,6 +41,7 @@ def test_chat_uses_supplied_thread_id() -> None:
     app = create_app()
     graph = FakeGraph()
     app.state.graph = graph
+    app.state.testing = True
     thread_id = "9de6a955-31ee-4a0c-b877-34123cd130d5"
     response = TestClient(app).post(
         "/api/v1/chat", json={"message": "Plan a trip", "thread_id": thread_id}
@@ -54,6 +56,7 @@ def test_chat_uses_requested_model() -> None:
     app = create_app()
     graph = FakeGraph()
     app.state.graph = graph
+    app.state.testing = True
     response = TestClient(app).post(
         "/api/v1/chat", json={"message": "Xin chào", "model": "travel_local"}
     )

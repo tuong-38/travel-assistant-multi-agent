@@ -1,4 +1,16 @@
 services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
   litellm:
     image: ghcr.io/berriai/litellm:v1.103.3
     command: ["--config", "/app/config.yaml", "--port", "4000"]
@@ -56,6 +68,11 @@ services:
       DEFAULT_MODEL: travel_general
       TRAVEL_TOOLS_MCP_URL: http://travel-tools-mcp:8001/mcp
       MCP_TIMEOUT_SECONDS: ${MCP_TIMEOUT_SECONDS:-5}
+      REDIS_URL: redis://redis:6379/0
+      REDIS_CLAIM_IDLE_MS: ${REDIS_CLAIM_IDLE_MS:-300000}
+      REDIS_HEARTBEAT_SECONDS: ${REDIS_HEARTBEAT_SECONDS:-30}
+      JOB_MAX_DELIVERY_ATTEMPTS: ${JOB_MAX_DELIVERY_ATTEMPTS:-5}
+      JOB_STATUS_TTL_SECONDS: ${JOB_STATUS_TTL_SECONDS:-604800}
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
@@ -65,8 +82,40 @@ services:
         condition: service_healthy
       travel-tools-mcp:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["/app/.venv/bin/python", "-m", "app.worker"]
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql://travel_assistant:${POSTGRES_PASSWORD:-local_only_change_me}@db:5432/travel_assistant
+      LITELLM_BASE_URL: http://litellm:4000/v1
+      LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-}
+      DEFAULT_MODEL: travel_general
+      TRAVEL_TOOLS_MCP_URL: http://travel-tools-mcp:8001/mcp
+      MCP_TIMEOUT_SECONDS: ${MCP_TIMEOUT_SECONDS:-5}
+      REDIS_URL: redis://redis:6379/0
+      REDIS_CLAIM_IDLE_MS: ${REDIS_CLAIM_IDLE_MS:-300000}
+      REDIS_HEARTBEAT_SECONDS: ${REDIS_HEARTBEAT_SECONDS:-30}
+      JOB_MAX_DELIVERY_ATTEMPTS: ${JOB_MAX_DELIVERY_ATTEMPTS:-5}
+      JOB_STATUS_TTL_SECONDS: ${JOB_STATUS_TTL_SECONDS:-604800}
+      WORKER_SHUTDOWN_GRACE_SECONDS: ${WORKER_SHUTDOWN_GRACE_SECONDS:-30}
+    depends_on:
+      db:
+        condition: service_healthy
+      litellm:
+        condition: service_healthy
+      travel-tools-mcp:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
   postgres_data:
+  redis_data:
 
