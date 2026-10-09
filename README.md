@@ -83,4 +83,10 @@ uv run ruff format --check .
 docker compose config
 ```
 
+## Phase 8 – verification status
+
+- **Phase 8.3** – edge‑case worker tests were previously reported **PASS**.
+- **Phase 8.4** – four targeted tests were reported **PASS**: the two HITL tests, `tests/test_phase4_e2e.py`, and the worker redelivery test.
+- **PostgreSQL checkpoint persistence across two independent runtime instances** – **DEFERRED / UNVERIFIED** (dedicated test not run).
+
 This local-only gateway setup has no user authentication or LiteLLM database-backed virtual keys. Do not expose it to untrusted networks or reuse its shared admin-level key in production.
