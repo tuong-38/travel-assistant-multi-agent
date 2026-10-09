@@ -96,8 +96,21 @@ class StreamWorker:
             heartbeat = asyncio.create_task(self._heartbeat(consumer, stream_id))
             try:
                 await self._execute(job)
-                await self.jobs.set_status(job_id, "succeeded")
-                await self.jobs.acknowledge(stream_id)
+                # ---- SUCCESSFUL EXECUTION ----
+                try:
+                    await self.jobs.set_status(job_id, "succeeded")
+                except Exception as exc:
+                    # Preserve job for retry; do not downgrade status.
+                    logger.error("status_succeeded_failed", job_id=job_id, error=exc)
+                    # Exit early – entry remains un‑acked for redelivery.
+                    return
+                try:
+                    await self.jobs.acknowledge(stream_id)
+                except Exception as exc:
+                    # Status already "succeeded"; keep it and let redelivery handle the entry.
+                    logger.error("ack_failed", job_id=job_id, error=exc)
+                    return
+                logger.info("job_completed", job_id=job_id, thread_id=fields.get("thread_id"))
             except StaleJobError as exc:
                 await self.jobs.set_status(job_id, "failed", error=str(exc))
                 await self.jobs.acknowledge(stream_id)

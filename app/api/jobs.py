@@ -4,6 +4,8 @@ from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Request, status
+import structlog
+logger = structlog.get_logger(__name__)
 from pydantic import BaseModel
 
 from app.api.chat import (
@@ -63,6 +65,7 @@ async def enqueue_chat(payload: ChatRequest, request: Request) -> QueuedJobRespo
                 operation="chat",
                 payload={"message": payload.message, "model_alias": model_alias},
             )
+            logger.info("job_enqueued", job_id=job_id, thread_id=thread_id)
     except HTTPException:
         raise
     except Exception as exc:
