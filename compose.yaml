@@ -85,6 +85,12 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, urllib.request; url='http://127.0.0.1:8000/api/v1/health/live'; r=urllib.request.urlopen(url, timeout=5); sys.exit(0 if r.status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   worker:
     build: .
