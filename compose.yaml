@@ -121,7 +121,24 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  db_test:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: travel_assistant_checkpoint_test
+      POSTGRES_USER: checkpoint_test
+      POSTGRES_PASSWORD: ${POSTGRES_TEST_PASSWORD:?POSTGRES_TEST_PASSWORD is required}
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U checkpoint_test -d travel_assistant_checkpoint_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
 volumes:
   postgres_data:
   redis_data:
+  postgres_test_data:
 
