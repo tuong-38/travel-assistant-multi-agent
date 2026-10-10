@@ -10,82 +10,125 @@ import pytest
 # ----------------------------------------------------------------------
 # ``langgraph.checkpoint.postgres.aio`` provides ``AsyncPostgresSaver`` – we
 # replace it with a minimal dummy class.
-langgraph_pkg = types.ModuleType('langgraph')
-checkpoint_pkg = types.ModuleType('langgraph.checkpoint')
-postgres_pkg = types.ModuleType('langgraph.checkpoint.postgres')
-postgres_aio_pkg = types.ModuleType('langgraph.checkpoint.postgres.aio')
+import pytest
+import sys
+import types
 
-class DummyAsyncPostgresSaver:  # pragma: no cover
-    pass
+# ----------------------------------------------------------------------
+# Autouse fixture: inject minimal LangGraph and related stubs for each test.
+# Restores original ``sys.modules`` entries after the test finishes.
+# ----------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def langgraph_stub(monkeypatch):
+    """Temporarily replace the ``langgraph`` family of modules with lightweight stubs.
+    The fixture runs for every test in this module, ensuring isolation from other
+    tests that need the real ``langgraph`` implementation.
+    """
+    # Modules that will be overridden
+    stub_keys = [
+        'langgraph',
+        'langgraph.checkpoint',
+        'langgraph.checkpoint.postgres',
+        'langgraph.checkpoint.postgres.aio',
+        'langgraph.types',
+        'langgraph.graph',
+        'langchain_openai',
+        'mcp',
+        'mcp.server',
+        'mcp.server.mcpserver',
+        'structlog',
+        'structlog.testing',
+    ]
+    # Preserve originals for restoration
+    originals = {k: sys.modules.get(k) for k in stub_keys}
 
-postgres_aio_pkg.AsyncPostgresSaver = DummyAsyncPostgresSaver
+    # --- Build stub packages -------------------------------------------------
+    langgraph_pkg = types.ModuleType('langgraph')
+    checkpoint_pkg = types.ModuleType('langgraph.checkpoint')
+    postgres_pkg = types.ModuleType('langgraph.checkpoint.postgres')
+    postgres_aio_pkg = types.ModuleType('langgraph.checkpoint.postgres.aio')
 
-# Stub for langgraph.types
-langgraph_types_pkg = types.ModuleType('langgraph.types')
-class DummyCommand:  # pragma: no cover
-    pass
-langgraph_types_pkg.Command = DummyCommand
-langgraph_types_pkg.interrupt = object()
-sys.modules['langgraph.types'] = langgraph_types_pkg
-
-# Populate the module hierarchy in ``sys.modules``
-sys.modules['langgraph'] = langgraph_pkg
-sys.modules['langgraph.checkpoint'] = checkpoint_pkg
-sys.modules['langgraph.checkpoint.postgres'] = postgres_pkg
-sys.modules['langgraph.checkpoint.postgres.aio'] = postgres_aio_pkg
-sys.modules['langgraph.checkpoint.postgres'] = postgres_pkg
-# Stub langgraph.graph module for worker imports
-langgraph_graph_pkg = types.ModuleType('langgraph.graph')
-langgraph_graph_pkg.END = object()
-langgraph_graph_pkg.START = object()
-class DummyStateGraph:
-    def __init__(self, *args, **kwargs):
+    class DummyAsyncPostgresSaver:  # pragma: no cover
         pass
-    def add_node(self, *args, **kwargs):
-        pass
-    def set_entry_point(self, *args, **kwargs):
-        pass
-    def compile(self):
-        return self
-langgraph_graph_pkg.StateGraph = DummyStateGraph
-sys.modules['langgraph.graph'] = langgraph_graph_pkg
-sys.modules['langgraph.checkpoint.postgres.aio'] = postgres_aio_pkg
+    postgres_aio_pkg.AsyncPostgresSaver = DummyAsyncPostgresSaver
 
-# ``langchain_openai`` is imported in several modules (LLM factory).  Stub it.
-langchain_openai_pkg = types.ModuleType('langchain_openai')
-langchain_openai_pkg.ChatOpenAI = object
-sys.modules['langchain_openai'] = langchain_openai_pkg
+    # Stub langgraph.types
+    langgraph_types_pkg = types.ModuleType('langgraph.types')
+    class DummyCommand:  # pragma: no cover
+        pass
+    langgraph_types_pkg.Command = DummyCommand
+    langgraph_types_pkg.interrupt = object()
+    monkeypatch.setitem(sys.modules, 'langgraph.types', langgraph_types_pkg)
 
-# ``mcp`` client/server modules – stub a minimal ``Client`` class.
-mcp_pkg = types.ModuleType('mcp')
-class DummyMCPClient:  # pragma: no cover
-    pass
-mcp_pkg.Client = DummyMCPClient
-sys.modules['mcp'] = mcp_pkg
-# Stub mcp.server.mcpserver module for MCPToolClient import
-mcp_server_pkg = types.ModuleType('mcp.server')
-mcpserver_mod = types.ModuleType('mcp.server.mcpserver')
-class DummyMCPServer:
-    pass
-mcpserver_mod.MCPServer = DummyMCPServer
-sys.modules['mcp.server'] = mcp_server_pkg
-sys.modules['mcp.server.mcpserver'] = mcpserver_mod
+    # Populate hierarchy
+    for name, module in [
+        ('langgraph', langgraph_pkg),
+        ('langgraph.checkpoint', checkpoint_pkg),
+        ('langgraph.checkpoint.postgres', postgres_pkg),
+        ('langgraph.checkpoint.postgres.aio', postgres_aio_pkg),
+        ('langgraph.checkpoint.postgres', postgres_pkg),
+    ]:
+        monkeypatch.setitem(sys.modules, name, module)
 
-# ``structlog.testing`` is used in some tests – provide a stub ``capture_logs``.
-structlog_pkg = types.ModuleType('structlog')
-# Provide a minimal logger with .error/.debug/.info methods used in advisory_lock
-class _DummyLogger:
-    def error(self, *args, **kwargs):
+    # Stub langgraph.graph
+    langgraph_graph_pkg = types.ModuleType('langgraph.graph')
+    langgraph_graph_pkg.END = object()
+    langgraph_graph_pkg.START = object()
+    class DummyStateGraph:
+        def __init__(self, *args, **kwargs):
+            pass
+        def add_node(self, *args, **kwargs):
+            pass
+        def set_entry_point(self, *args, **kwargs):
+            pass
+        def compile(self):
+            return self
+    langgraph_graph_pkg.StateGraph = DummyStateGraph
+    monkeypatch.setitem(sys.modules, 'langgraph.graph', langgraph_graph_pkg)
+
+    # Stub langchain_openai
+    langchain_openai_pkg = types.ModuleType('langchain_openai')
+    langchain_openai_pkg.ChatOpenAI = object
+    monkeypatch.setitem(sys.modules, 'langchain_openai', langchain_openai_pkg)
+
+    # Stub mcp client/server
+    mcp_pkg = types.ModuleType('mcp')
+    class DummyMCPClient:  # pragma: no cover
         pass
-    def debug(self, *args, **kwargs):
+    mcp_pkg.Client = DummyMCPClient
+    monkeypatch.setitem(sys.modules, 'mcp', mcp_pkg)
+
+    mcp_server_pkg = types.ModuleType('mcp.server')
+    mcpserver_mod = types.ModuleType('mcp.server.mcpserver')
+    class DummyMCPServer:
         pass
-    def info(self, *args, **kwargs):
-        pass
-structlog_pkg.get_logger = lambda name=None: _DummyLogger()
-structlog_testing_pkg = types.ModuleType('structlog.testing')
-structlog_testing_pkg.capture_logs = lambda *args, **kwargs: (lambda func: func)
-sys.modules['structlog'] = structlog_pkg
-sys.modules['structlog.testing'] = structlog_testing_pkg
+    mcpserver_mod.MCPServer = DummyMCPServer
+    monkeypatch.setitem(sys.modules, 'mcp.server', mcp_server_pkg)
+    monkeypatch.setitem(sys.modules, 'mcp.server.mcpserver', mcpserver_mod)
+
+    # Stub structlog.testing
+    structlog_pkg = types.ModuleType('structlog')
+    class _DummyLogger:
+        def error(self, *args, **kwargs):
+            pass
+        def debug(self, *args, **kwargs):
+            pass
+        def info(self, *args, **kwargs):
+            pass
+    structlog_pkg.get_logger = lambda name=None: _DummyLogger()
+    structlog_testing_pkg = types.ModuleType('structlog.testing')
+    structlog_testing_pkg.capture_logs = lambda *args, **kwargs: (lambda func: func)
+    monkeypatch.setitem(sys.modules, 'structlog', structlog_pkg)
+    monkeypatch.setitem(sys.modules, 'structlog.testing', structlog_testing_pkg)
+
+    # Yield to test execution; after test, restore originals.
+    yield
+    for key, original in originals.items():
+        if original is None:
+            sys.modules.pop(key, None)
+        else:
+            sys.modules[key] = original
+
 
 # ----------------------------------------------------------------------
 # Now import the worker under test
