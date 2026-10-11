@@ -83,7 +83,5 @@ databases:
   - name: db
   - name: db_staging
 
-keyValues:
-  - name: redis
-  - name: redis_staging
+
 
