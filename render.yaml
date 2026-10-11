@@ -5,7 +5,8 @@ services:
     dockerfilePath: ./Dockerfile
     dockerContext: .
     envVars:
-      - key: APP_ENV               # value injected per environment (see projects)
+      - key: APP_ENV
+        value: development
       - key: LOG_LEVEL
         value: INFO
       - key: DATABASE_URL
