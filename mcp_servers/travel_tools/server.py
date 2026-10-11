@@ -1,5 +1,5 @@
 from mcp.server.mcpserver import MCPServer
-
+import os
 from app.graph.state import DestinationInfo
 from mcp_servers.travel_tools.tools import search_destination_data
 
@@ -13,4 +13,8 @@ def search_destination(destination: str) -> DestinationInfo:
 
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http", host="0.0.0.0", port=8001)
+    mcp.run(
+    transport="streamable-http",
+    host="0.0.0.0",
+    port=int(os.environ.get("PORT", "8001")),
+)
