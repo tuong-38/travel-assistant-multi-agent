@@ -1,0 +1,122 @@
+services:
+  - type: web
+    name: api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    envVars:
+      - key: APP_ENV               # value injected per environment (see projects)
+      - key: LOG_LEVEL
+        value: INFO
+      - key: DATABASE_URL
+        fromDatabase:
+          name: db
+          property: connectionString
+      - key: LITELLM_BASE_URL
+        value: http://litellm:4000/v1
+      - key: LITELLM_API_KEY
+        sync: false
+      - key: DEFAULT_MODEL
+        value: travel_general
+      - key: TRAVEL_TOOLS_MCP_URL
+        value: http://travel-tools-mcp:8001/mcp   # full URL required by code
+      - key: REDIS_URL
+        fromService:
+          name: redis
+          type: keyvalue
+          property: connectionString
+    healthCheckPath: /api/v1/health/live
+
+  - type: worker
+    name: worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: "/app/.venv/bin/python -m app.worker"
+    envVars:
+      - key: APP_ENV               # value injected per environment
+      - key: LOG_LEVEL
+        value: INFO
+      - key: DATABASE_URL
+        fromDatabase:
+          name: db
+          property: connectionString
+      - key: LITELLM_BASE_URL
+        value: http://litellm:4000/v1
+      - key: LITELLM_API_KEY
+        sync: false
+      - key: DEFAULT_MODEL
+        value: travel_general
+      - key: TRAVEL_TOOLS_MCP_URL
+        value: http://travel-tools-mcp:8001/mcp   # full URL
+      - key: REDIS_URL
+        fromService:
+          name: redis
+          type: keyvalue
+          property: connectionString
+
+  - type: pserv
+    name: litellm
+    runtime: docker
+    dockerfilePath: ./litellm/Dockerfile
+    dockerContext: ./litellm
+    dockerCommand: "--config /app/config.yaml --port 4000"
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: LITELLM_MASTER_KEY
+        sync: false
+
+  - type: pserv
+    name: travel-tools-mcp
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: "/app/.venv/bin/python -m mcp_servers.travel_tools.server"
+    envVars: []
+
+  - type: keyvalue
+    name: redis
+    ipAllowList: []
+
+databases:
+  - name: db
+  - name: db_staging
+
+keyValues:
+  - name: redis
+  - name: redis_staging
+
+projects:
+  - name: development
+    environments:
+      - name: development
+        services:
+          - api
+          - worker
+          - litellm
+          - travel-tools-mcp
+        databases:
+          - db
+        keyValues:
+          - redis
+        envVars:
+          - key: APP_ENV
+            value: development
+
+  - name: staging
+    environments:
+      - name: staging
+        services:
+          - api
+          - worker
+          - litellm
+          - travel-tools-mcp
+        databases:
+          - db_staging
+        keyValues:
+          - redis_staging
+        envVars:
+          - key: APP_ENV
+            value: staging
+
