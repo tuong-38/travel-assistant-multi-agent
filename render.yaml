@@ -36,6 +36,7 @@ services:
     dockerCommand: "/app/.venv/bin/python -m app.worker"
     envVars:
       - key: APP_ENV               # value injected per environment
+        value: development
       - key: LOG_LEVEL
         value: INFO
       - key: DATABASE_URL
