@@ -67,12 +67,12 @@ services:
       - key: LITELLM_MASTER_KEY
         sync: false
 
+  
   - type: pserv
     name: travel-tools-mcp
     runtime: docker
-    dockerfilePath: ./Dockerfile
+    dockerfilePath: ./Dockerfile.mcp
     dockerContext: .
-    dockerCommand: "/app/.venv/bin/python -m mcp_servers.travel_tools.server"
     envVars: []
 
   - type: keyvalue
